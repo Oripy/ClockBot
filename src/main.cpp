@@ -1,0 +1,286 @@
+#include <Arduino.h>
+#include <Wire.h>
+#include <OneButton.h>
+#include "face_handling.h"
+#include <RTClib.h>
+#include <TM1637Display.h>
+#include "head_controller.h"
+
+// Pin Definitions
+#define TM1637_CLK D0
+#define TM1637_DIO D1
+#define TILT_SERVO_PIN D2
+#define PAN_SERVO_PIN D3
+#define SDA_PIN D4
+#define SCL_PIN D5
+#define LEFT_BUTTON_PIN D6
+#define RIGHT_BUTTON_PIN D7
+
+#define LONG_PRESS_DURATION 1500 // Duration in milliseconds for long press detection
+
+enum Modes {
+  MODE_SETUP,
+  MODE_IDLE,
+  MODE_NIGHT,
+  MODE_ACTIVE,
+  MODE_GAME
+};
+
+// Initialize display and RTC
+TM1637Display display(TM1637_CLK, TM1637_DIO);
+RTC_DS3231 rtc;
+
+// Initialize OneButton on LEFT_BUTTON_PIN (Active LOW, pullup enabled)
+OneButton btn_left(LEFT_BUTTON_PIN, true, true);
+OneButton btn_right(RIGHT_BUTTON_PIN, true, true);
+
+// State Machine Variables
+enum ClockState { IDLE_MODE, NIGHT_MODE, ACTIVE_MODE, SET_HOURS, SET_MINUTES };
+ClockState currentState = IDLE_MODE;
+
+// Temporary variables used during editing
+int editHour = 0;
+int editMinute = 0;
+int lastFrameUpdate = 0;
+int lastInteractionTime = 0;
+
+// Blinking effect variables (used in setup mode)
+unsigned long lastBlinkTime = 0;
+bool blinkState = true;
+const int BLINK_INTERVAL = 300; // Blink every 300ms
+
+FaceHandler faceHandler;
+HeadController head;
+
+// ==========================================
+// BUTTON EVENT CALLBACK FUNCTIONS
+// ==========================================
+
+void handleLeftClick() {
+    lastInteractionTime = millis(); // Reset idle timer on any interaction
+    switch (currentState) {
+        case SET_HOURS:
+            editHour = (editHour + 1) % 24; // Increment hour, wrap around at 24
+            Serial.print("Hours edited to: "); Serial.println(editHour);
+            break;
+        case SET_MINUTES:
+            editMinute = (editMinute + 1) % 60; // Increment minute, wrap around at 60
+            Serial.print("Minutes edited to: "); Serial.println(editMinute);
+            break;
+        case IDLE_MODE:
+            currentState = ACTIVE_MODE;
+            break;
+        default:
+            // In NORMAL_MODE, left click does nothing
+            break;
+    }
+}
+
+void handleRightClick() {
+    lastInteractionTime = millis(); // Reset idle timer on any interaction
+    switch (currentState) {
+        case SET_HOURS:
+            editHour = (editHour + 23) % 24; // Decrement hour by 1 (while making sure it doesn't go below 0), wrap around at 24
+            Serial.print("Hours edited to: "); Serial.println(editHour);
+            break;
+        case SET_MINUTES:
+            editMinute = (editMinute + 59) % 60; // Decrement minute, wrap around at 60
+            Serial.print("Minutes edited to: "); Serial.println(editMinute);
+            break;
+        case IDLE_MODE:
+            currentState = ACTIVE_MODE;
+            break;
+        default:
+            // In NORMAL_MODE, right click does nothing
+            break;
+    }
+}
+
+// Triggers once the button has been held down for the duration of the long-press threshold
+void handleLeftLongPressStart() {
+    lastInteractionTime = millis(); // Reset idle timer on any interaction
+    switch (currentState) {
+        case NIGHT_MODE: // A COMMENTER SUR LA VERSION FINALE
+        case IDLE_MODE: {
+            // Enter setup: Fetch current time first to start editing from there
+            DateTime now = rtc.now();  
+            editHour = now.hour();
+            editMinute = now.minute();
+            currentState = SET_HOURS;
+            Serial.println("Entered Setup: Setting HOURS");
+            break;
+        }
+        case SET_HOURS: {
+            // Move to setting minutes
+            currentState = SET_MINUTES;
+            Serial.println("Setting MINUTES");
+            break;
+        }
+        case SET_MINUTES: {
+            // Save new time to the physical RTC module
+            DateTime now_after_setup = rtc.now();
+            rtc.adjust(DateTime(now_after_setup.year(), now_after_setup.month(), now_after_setup.day(), editHour, editMinute, 0));
+            
+            currentState = IDLE_MODE;
+            Serial.println("Time Saved! Exited Setup.");
+            break;
+        }
+    }
+}
+
+void handleRightLongPressStart() {
+    lastInteractionTime = millis(); // Reset idle timer on any interaction
+    switch (currentState) {
+        default:
+            // In NORMAL_MODE or any other state, right long press does nothing
+            break;
+    }
+}
+
+// ==========================================
+// STATE EXECUTION METHODS
+// ==========================================
+
+void updateClock() {
+    DateTime now = rtc.now();
+    int displayTime = (now.hour() * 100) + now.minute();
+    
+    // Blink the center colon based on seconds tick
+    bool showColon = (now.second() % 2 == 0);
+    display.showNumberDecEx(displayTime, showColon ? 0b01000000 : 0, true);
+
+    if (now.hour() >= 22 || now.hour() < 7) {
+        currentState = NIGHT_MODE;
+    } else if (currentState == NIGHT_MODE) {
+        currentState = IDLE_MODE;
+    }
+}
+
+void runSetupMode() {
+    // Non-blocking timer to toggle blinking state
+    if (millis() - lastBlinkTime >= BLINK_INTERVAL) {
+        blinkState = !blinkState;
+        lastBlinkTime = millis();
+    }
+
+    uint8_t data[4] = {0, 0, 0, 0};
+
+    // Convert editing values to raw segment arrays
+    int h1 = editHour / 10;
+    int h2 = editHour % 10;
+    int m1 = editMinute / 10;
+    int m2 = editMinute % 10;
+
+    // Encode digits to TM1637 raw data format
+    data[0] = display.encodeDigit(h1);
+    data[1] = display.encodeDigit(h2);
+    data[2] = display.encodeDigit(m1);
+    data[3] = display.encodeDigit(m2);
+
+    // Apply Blink effect based on current configuration state
+    if (currentState == SET_HOURS) {
+        if (!blinkState) {
+        data[0] = 0x00; // Turn off first digit
+        data[1] = 0x00; // Turn off second digit
+        }
+    } 
+    else if (currentState == SET_MINUTES) {
+        if (!blinkState) {
+        data[2] = 0x00; // Turn off third digit
+        data[3] = 0x00; // Turn off fourth digit
+        }
+    }
+
+    // Draw the custom raw segment array to the display
+    // Or, with the colon turned on solidly (0x80) to signify edit mode
+    data[1] |= 0b10000000; 
+    display.setSegments(data);
+}
+
+// ==========================================
+// SETUP & MAIN LOOP
+// ==========================================
+
+void setup() {
+    Serial.begin(115200);
+    display.setBrightness(3);
+
+    // Initialize I2C with explicit pin numbers
+    Wire.begin(); 
+
+    // delay(2000); // Allow time for Serial Monitor to initialize
+    // Serial.println("ClockBot Starting...");
+    
+    faceHandler.init(); // Initialize the Face object
+    // Serial.println("FaceHandler initialized.");
+
+    head.init(PAN_SERVO_PIN, TILT_SERVO_PIN);
+
+    if (!rtc.begin()) {
+        Serial.println("Couldn't find RTC module!");
+        while (1);
+    }
+
+    // Configure OneButton events and timing settings
+    btn_left.setPressMs(LONG_PRESS_DURATION);
+    btn_left.attachClick(handleLeftClick);
+    btn_left.attachLongPressStart(handleLeftLongPressStart);
+    btn_right.setPressMs(LONG_PRESS_DURATION);
+    btn_right.attachClick(handleRightClick);
+    btn_right.attachLongPressStart(handleRightLongPressStart);
+}
+
+ClockState lastState = IDLE_MODE;
+
+void loop() {
+    // Keep monitoring the physical button state
+    btn_left.tick();
+    btn_right.tick();
+
+    faceHandler.update(); // Update the Face object (handles eye movement, blinking, etc.)
+    // if (millis() % 5000 < 50) { // Every 5 seconds
+    //     head.setTarget(random(0, 180), random(0, 180));
+    // }
+    head.update(); // Keep the head moving toward the target
+    if (currentState != lastState) {
+        Serial.print("State changed to: ");
+        switch (currentState) {
+            case IDLE_MODE: Serial.println("IDLE_MODE"); break;
+            case NIGHT_MODE: Serial.println("NIGHT_MODE"); break;
+            case ACTIVE_MODE: Serial.println("ACTIVE_MODE"); break;
+            case SET_HOURS: Serial.println("SET_HOURS"); break;
+            case SET_MINUTES: Serial.println("SET_MINUTES"); break;
+        }
+        lastState = currentState;
+    }
+
+    // Run the display routines
+    if (millis() - lastFrameUpdate >= 10) { // only update every 10ms (100FPS)
+        // if (millis() - lastInteractionTime > 30000 && currentState != NIGHT_MODE) { // 30 seconds of inactivity
+        if (millis() - lastInteractionTime > 10000 && currentState != NIGHT_MODE && currentState != SET_HOURS && currentState != SET_MINUTES) { // 10 seconds of inactivity
+            currentState = IDLE_MODE; // Return to idle mode
+        }
+        switch (currentState) {
+            case IDLE_MODE:
+                display.setBrightness(3); // Normal brightness for idle mode
+                updateClock();
+                faceHandler.setIdle();
+                break;
+            case ACTIVE_MODE:
+                display.setBrightness(3); // Normal brightness for idle mode
+                updateClock();
+                faceHandler.setActive();
+                break;
+            case NIGHT_MODE:
+                display.setBrightness(1); // Dim display for night mode
+                updateClock();
+                faceHandler.setAsleep();
+                break;
+            case SET_HOURS:
+            case SET_MINUTES:
+                runSetupMode();
+                break;
+        }
+        lastFrameUpdate = millis(); // Update the clock update time
+    }
+}

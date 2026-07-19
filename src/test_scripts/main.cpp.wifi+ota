@@ -1,0 +1,33 @@
+#include <Arduino.h>
+#include <WiFiManager.h>
+#include "OTAManager.h"
+
+WiFiManager wm;
+OtaManager ota;
+
+void setup() {
+    Serial.begin(115200);
+    delay(3000); // Give the user time to open the Serial Monitor
+    Serial.println("Monitor started. Waiting for WiFi connection...");
+
+    // WiFi.mode(WIFI_STA);
+    wm.autoConnect("ClockBot", "ClockBot");
+
+    wm.setConfigPortalBlocking(false);
+    wm.setConfigPortalTimeout(600);
+
+    if(wm.autoConnect("AutoConnectAP")){
+        Serial.println("connected :)");
+        delay(1000); // Wait a moment to ensure the connection is established
+        ota.begin();
+    }
+    else {
+        Serial.println("Configportal running");
+    }
+}
+
+void loop() {
+    // wm.process();
+    ota.handle();
+    // delay(10); // Small delay to prevent watchdog resets and allow other tasks to run
+}

@@ -1,0 +1,17 @@
+#include <ESP32Servo.h>
+#include "HeadController.h"
+
+HeadController head;
+const int panPin = 3;
+const int tiltPin = 4;
+
+void setup() {
+  head.init(panPin, tiltPin);
+}
+
+void loop() {
+    if (millis() % 5000 < 50) { // Every 5 seconds
+        head.setTarget(random(0, 180), random(0, 180));
+    }
+    head.update(); // Keep the head moving toward the target
+}

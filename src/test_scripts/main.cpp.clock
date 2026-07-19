@@ -1,0 +1,163 @@
+#include <Wire.h>
+#include <RTClib.h>
+#include <TM1637Display.h>
+#include <OneButton.h>
+
+// Pin Definitions
+#define SDA_PIN 1
+#define SCL_PIN 2
+#define BUTTON_PIN D2  // Left Button
+#define CLK_PIN D4
+#define DIO_PIN D5
+
+
+// Initialize display and RTC
+TM1637Display display(CLK_PIN, DIO_PIN);
+RTC_DS3231 rtc;
+
+// Initialize OneButton on BUTTON_PIN (Active LOW, pullup enabled)
+OneButton btn(BUTTON_PIN, true, true);
+
+// State Machine Variables
+enum ClockState { NORMAL_MODE, SET_HOURS, SET_MINUTES };
+ClockState currentState = NORMAL_MODE;
+
+// Temporary variables used during editing
+int editHour = 0;
+int editMinute = 0;
+
+// Blinking effect variables (used in setup mode)
+unsigned long lastBlinkTime = 0;
+bool blinkState = true;
+const int BLINK_INTERVAL = 300; // Blink every 300ms
+
+// ==========================================
+// BUTTON EVENT CALLBACK FUNCTIONS
+// ==========================================
+
+// Triggers on a quick tap
+void handleClick() {
+  if (currentState == SET_HOURS) {
+    editHour = (editHour + 1) % 24; // Increment hour, wrap around at 24
+    Serial.print("Hours edited to: "); Serial.println(editHour);
+  } 
+  else if (currentState == SET_MINUTES) {
+    editMinute = (editMinute + 1) % 60; // Increment minute, wrap around at 60
+    Serial.print("Minutes edited to: "); Serial.println(editMinute);
+  }
+}
+
+// Triggers once the button has been held down for the duration of the long-press threshold
+void handleLongPressStart() {
+  if (currentState == NORMAL_MODE) {
+    // Enter setup: Fetch current time first to start editing from there
+    DateTime now = rtc.now();
+    editHour = now.hour();
+    editMinute = now.minute();
+    currentState = SET_HOURS;
+    Serial.println("Entered Setup: Setting HOURS");
+  } 
+  else if (currentState == SET_HOURS) {
+    // Move to setting minutes
+    currentState = SET_MINUTES;
+    Serial.println("Setting MINUTES");
+  } 
+  else if (currentState == SET_MINUTES) {
+    // Save new time to the physical RTC module
+    DateTime now = rtc.now();
+    rtc.adjust(DateTime(now.year(), now.month(), now.day(), editHour, editMinute, 0));
+    
+    currentState = NORMAL_MODE;
+    Serial.println("Time Saved! Exited Setup.");
+  }
+}
+
+// ==========================================
+// STATE EXECUTION METHODS
+// ==========================================
+
+void runNormalMode() {
+  DateTime now = rtc.now();
+  int displayTime = (now.hour() * 100) + now.minute();
+  
+  // Blink the center colon based on seconds tick
+  bool showColon = (now.second() % 2 == 0);
+  display.showNumberDecEx(displayTime, showColon ? 0b01000000 : 0, true);
+  
+  delay(50); // Small delay to prevent hammering the I2C bus too hard
+}
+
+void runSetupMode() {
+  // Non-blocking timer to toggle blinking state
+  if (millis() - lastBlinkTime >= BLINK_INTERVAL) {
+    blinkState = !blinkState;
+    lastBlinkTime = millis();
+  }
+
+  uint8_t data[4] = {0, 0, 0, 0};
+
+  // Convert editing values to raw segment arrays
+  int h1 = editHour / 10;
+  int h2 = editHour % 10;
+  int m1 = editMinute / 10;
+  int m2 = editMinute % 10;
+
+  // Encode digits to TM1637 raw data format
+  data[0] = display.encodeDigit(h1);
+  data[1] = display.encodeDigit(h2);
+  data[2] = display.encodeDigit(m1);
+  data[3] = display.encodeDigit(m2);
+
+  // Apply Blink effect based on current configuration state
+  if (currentState == SET_HOURS) {
+    if (!blinkState) {
+      data[0] = 0x00; // Turn off first digit
+      data[1] = 0x00; // Turn off second digit
+    }
+  } 
+  else if (currentState == SET_MINUTES) {
+    if (!blinkState) {
+      data[2] = 0x00; // Turn off third digit
+      data[3] = 0x00; // Turn off fourth digit
+    }
+  }
+
+  // Draw the custom raw segment array to the display
+  // Or, with the colon turned on solidly (0x80) to signify edit mode
+  data[1] |= 0b10000000; 
+  display.setSegments(data);
+}
+
+// ==========================================
+// SETUP & MAIN LOOP
+// ==========================================
+
+void setup() {
+  Serial.begin(115200);
+  display.setBrightness(3);
+  
+  // Initialize I2C with explicit pin numbers
+  Wire.begin(SDA_PIN, SCL_PIN); 
+
+  if (!rtc.begin()) {
+    Serial.println("Couldn't find RTC module!");
+    while (1);
+  }
+
+  // Configure OneButton events and timing settings
+  btn.setPressMs(1500); // Set long press duration to 1.5 seconds
+  btn.attachClick(handleClick);
+  btn.attachLongPressStart(handleLongPressStart);
+}
+
+void loop() {
+  // Keep monitoring the physical button state
+  btn.tick();
+
+  // Run the display routines
+  if (currentState == NORMAL_MODE) {
+    runNormalMode();
+  } else {
+    runSetupMode();
+  }
+}

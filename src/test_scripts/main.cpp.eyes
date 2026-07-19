@@ -1,0 +1,51 @@
+#include <Arduino.h>
+#include <SPI.h>       // Satisfies PlatformIO LDF
+#include <Wire.h>
+#include "Face.h"      // Main library header
+
+Face *face;
+
+void setup() {
+  // Initialize Serial at a fast, standard rate
+  Serial.begin(115200);
+  delay(3000); // Give the user time to open the Serial Monitor
+  
+  // 3. Initialize the Face object
+  face = new Face(128, 64, 38); 
+
+  // face->Expression.GoTo_Normal();
+  face->Behavior.SetEmotion(eEmotions::Happy, 1.0);
+  face->Behavior.SetEmotion(eEmotions::Angry, 1.0);
+  face->Behavior.SetEmotion(eEmotions::Sleepy, 1.0);
+  face->Behavior.SetEmotion(eEmotions::Normal, 1.0);
+  face->Behavior.SetEmotion(eEmotions::Scared, 1.0);
+  face->Behavior.SetEmotion(eEmotions::Awe, 1.0);
+  face->Behavior.SetEmotion(eEmotions::Surprised, 1.0);
+
+  // Configure behaviors
+  face->RandomBehavior = true;
+  face->Behavior.Timer.SetIntervalMillis(5000);
+  face->RandomBlink = true;
+  face->Blink.Timer.SetIntervalMillis(3500); // Blink roughly every 3.5s
+  face->RandomLook = false;
+  // face->Look.Timer.SetIntervalMillis(2500); // Look around every 2.5s
+
+  Serial.println("[SYSTEM] Setup complete! Starting render loop...");
+}
+
+void loop() {
+  static unsigned long lastFrameLog = 0;
+  static unsigned long frameCount = 0;
+
+  // Run the display update and render loop
+  face->Update();
+  frameCount++;
+
+  // Log active rendering every 5 seconds to verify the code isn't hanging
+  if (millis() - lastFrameLog >= 5000) {
+    Serial.printf("[HEARTBEAT] System running. Rendered %lu frames in the last 5s.\n", frameCount);
+    frameCount = 0;
+    lastFrameLog = millis();
+  }
+  delay(10); // Small delay to prevent watchdog resets and allow other tasks to run
+}
