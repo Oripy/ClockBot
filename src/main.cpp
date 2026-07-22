@@ -5,6 +5,7 @@
 #include <RTClib.h>
 #include <TM1637Display.h>
 #include "head_controller.h"
+#include <FastLED.h>
 
 // Pin Definitions
 #define TM1637_CLK D0
@@ -15,8 +16,11 @@
 #define SCL_PIN D5
 #define LEFT_BUTTON_PIN D6
 #define RIGHT_BUTTON_PIN D7
+#define LED_PIN D9
 
 #define LONG_PRESS_DURATION 1500 // Duration in milliseconds for long press detection
+#define NUM_LEDS 3
+CRGB leds[NUM_LEDS];
 
 enum Modes {
   MODE_SETUP,
@@ -48,6 +52,8 @@ int lastInteractionTime = 0;
 unsigned long lastBlinkTime = 0;
 bool blinkState = true;
 const int BLINK_INTERVAL = 300; // Blink every 300ms
+
+int LEDcolor = 0;
 
 FaceHandler faceHandler;
 HeadController head;
@@ -203,16 +209,19 @@ void runSetupMode() {
 
 void setup() {
     Serial.begin(115200);
-    display.setBrightness(3);
-
-    // Initialize I2C with explicit pin numbers
-    Wire.begin(); 
-
     // delay(2000); // Allow time for Serial Monitor to initialize
     // Serial.println("ClockBot Starting...");
     
-    faceHandler.init(); // Initialize the Face object
-    // Serial.println("FaceHandler initialized.");
+    display.setBrightness(3);
+
+    // FastLED.addLeds<WS2812, D9>(leds, NUM_LEDS);
+    FastLED.addLeds<WS2812B, LED_PIN, GRB>(leds, NUM_LEDS);
+    FastLED.setBrightness(20);
+    FastLED.clear();
+
+    Wire.begin();
+
+    faceHandler.init();
 
     head.init(PAN_SERVO_PIN, TILT_SERVO_PIN);
 
@@ -237,6 +246,12 @@ void loop() {
     btn_left.tick();
     btn_right.tick();
 
+    leds[1] = CHSV(LEDcolor, 255, 255);
+    leds[2] = CHSV(LEDcolor, 255, 255);
+    // leds[1] = CRGB(255, 0, 0);
+    LEDcolor = (LEDcolor + 1) % 256; // Increment hue for next frame
+    FastLED.show();
+    
     faceHandler.update(); // Update the Face object (handles eye movement, blinking, etc.)
     // if (millis() % 5000 < 50) { // Every 5 seconds
     //     head.setTarget(random(0, 180), random(0, 180));

@@ -1,0 +1,19 @@
+#include <FastLED.h>
+#define NUM_LEDS 2
+CRGB leds[NUM_LEDS];
+
+void setup() { 
+    FastLED.addLeds<WS2812, D9>(leds, NUM_LEDS);
+    FastLED.setBrightness(50);
+}
+
+void loop() {;
+    leds[0] = CRGB::Red;
+    leds[1] = CRGB::Blue;
+    FastLED.show();
+    delay(500);
+    leds[0] = CRGB::Blue;
+    leds[1] = CRGB::Red;
+    FastLED.show();
+    delay(500);
+}
