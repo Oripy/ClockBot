@@ -4,6 +4,7 @@
 #include "face_handling.h"
 #include <RTClib.h>
 #include <TM1637Display.h>
+#include <ServoEasing.hpp>
 #include "head_controller.h"
 #include <FastLED.h>
 
@@ -253,10 +254,9 @@ void loop() {
     FastLED.show();
     
     faceHandler.update(); // Update the Face object (handles eye movement, blinking, etc.)
-    // if (millis() % 5000 < 50) { // Every 5 seconds
-    //     head.setTarget(random(0, 180), random(0, 180));
-    // }
-    head.update(); // Keep the head moving toward the target
+    if (millis() % 5000 < 50) { // Every 5 seconds
+        head.setTarget(random(0, 180), random(0, 180));
+    }
     if (currentState != lastState) {
         Serial.print("State changed to: ");
         switch (currentState) {
