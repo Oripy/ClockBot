@@ -1,5 +1,7 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <WiFiManager.h>
+#include "OTAManager.h"
 #include <OneButton.h>
 #include "face_handling.h"
 #include <RTClib.h>
@@ -7,6 +9,11 @@
 #include <ServoEasing.hpp>
 #include "head_controller.h"
 #include <FastLED.h>
+#include <Preferences.h>
+
+#define DEBUG true
+
+Preferences preferences;
 
 // Pin Definitions
 #define TM1637_CLK D0
@@ -56,8 +63,44 @@ const int BLINK_INTERVAL = 300; // Blink every 300ms
 
 int LEDcolor = 0;
 
+WiFiManager wm;
+int night_mode_time = 1200; // Default 20:00
+int day_mode_time = 480; // Default to 8:00
+bool shouldSaveConfig = false;
+bool portalClosed = false;
+unsigned long portalStartTime = 0;
+
+OtaManager ota;
 FaceHandler faceHandler;
 HeadController head;
+
+void saveConfigCallback() {
+  shouldSaveConfig = true;
+}
+
+String minutesToTimeStr(int totalMinutes) {
+  int hours = totalMinutes / 60;
+  int minutes = totalMinutes % 60;
+  char buf[6];
+  snprintf(buf, sizeof(buf), "%02d:%02d", hours, minutes);
+  return String(buf);
+}
+
+int timeStrToMinutes(String timeStr) {
+  int firstColon = timeStr.indexOf(':');
+  if (firstColon == -1) return 0;
+  
+  int hours = timeStr.substring(0, firstColon).toInt();
+  int minutes = timeStr.substring(firstColon + 1).toInt();
+  
+  // Bound check
+  if (hours < 0) hours = 0;
+  if (hours > 23) hours = 23;
+  if (minutes < 0) minutes = 0;
+  if (minutes > 59) minutes = 59;
+  
+  return (hours * 60) + minutes;
+}
 
 // ==========================================
 // BUTTON EVENT CALLBACK FUNCTIONS
@@ -209,9 +252,49 @@ void runSetupMode() {
 // ==========================================
 
 void setup() {
+    #if DEBUG
     Serial.begin(115200);
-    // delay(2000); // Allow time for Serial Monitor to initialize
-    // Serial.println("ClockBot Starting...");
+    delay(2000); // Allow time for Serial Monitor to initialize
+    Serial.println("ClockBot Starting...");
+    #endif
+
+    preferences.begin("config", false);
+    night_mode_time = preferences.getInt("time1", 1200);  // Default 20:00
+    day_mode_time = preferences.getInt("time2", 480); // Default 8:00
+    preferences.end();
+
+    #if DEBUG
+    Serial.printf("Night Mode (Minutes): %d (%s)\n", night_mode_time, minutesToTimeStr(night_mode_time).c_str());
+    Serial.printf("Day Mode (Minutes): %d (%s)\n", day_mode_time, minutesToTimeStr(day_mode_time).c_str());
+    #endif
+
+    String night_mode_time_str = minutesToTimeStr(night_mode_time);
+    String day_mode_time_str = minutesToTimeStr(day_mode_time);
+
+    wm.setConfigPortalBlocking(false);
+    wm.setConfigPortalTimeout(600);
+    wm.setSaveParamsCallback(saveConfigCallback);
+
+    WiFiManagerParameter night_mode_time_field("time1", "Night Start Time (HH:MM)", night_mode_time_str.c_str(), 6, "type=\"time\"");
+    WiFiManagerParameter day_mode_time_field("time2", "Night End Time (HH:MM)", day_mode_time_str.c_str(), 6, "type=\"time\"");
+
+    wm.addParameter(&night_mode_time_field);
+    wm.addParameter(&day_mode_time_field);
+
+    if (wm.autoConnect("ClockBot", "ClockBot")) {
+        #if DEBUG
+        Serial.println("Connected to Wi-Fi successfully!");
+        #endif
+        delay(1000);
+        ota.begin();
+    } else {
+        #if DEBUG
+        Serial.println("Failed to connect to Wi-Fi. Starting Non-Blocking Config Portal...");
+        #endif
+        wm.startConfigPortal("ClockBot", "ClockBot");
+        portalClosed = false;
+        portalStartTime = millis();
+    }
     
     display.setBrightness(3);
 
@@ -226,10 +309,11 @@ void setup() {
 
     head.init(PAN_SERVO_PIN, TILT_SERVO_PIN);
 
+    #if DEBUG
     if (!rtc.begin()) {
         Serial.println("Couldn't find RTC module!");
-        while (1);
     }
+    #endif
 
     // Configure OneButton events and timing settings
     btn_left.setPressMs(LONG_PRESS_DURATION);
@@ -243,6 +327,61 @@ void setup() {
 ClockState lastState = IDLE_MODE;
 
 void loop() {
+    if (WiFi.status() == WL_CONNECTED) {
+        #if DEBUG
+        Serial.println("OTA...");
+        #endif
+        ota.handle();
+    }
+
+    if (!portalClosed) {
+        if (millis() - portalStartTime >= 60000) {
+            #if DEBUG
+            Serial.println("Portal timeout reached. Closing config portal...");
+            #endif
+            
+            // Stop the configuration portal server/DNS gracefully
+            wm.stopConfigPortal();
+            portalClosed = true;
+            
+            #if DEBUG
+            Serial.println("Portal closed. Continuing loop in offline state.");
+            #endif
+        } else {
+            // Keep the portal responsive
+            wm.process();
+        }
+    }
+   
+    if (shouldSaveConfig) {
+        #if DEBUG
+        Serial.println("Parsing and saving new time configuration...");
+        #endif
+        
+        // Read the "HH:MM" strings submitted via the portal
+        String valStr1 = wm.getParameters()[0]->getValue();
+        String valStr2 = wm.getParameters()[1]->getValue();
+
+        // Convert strings to integer minutes with built-in validation checks
+        if (valStr1.length() > 0) {
+            night_mode_time = timeStrToMinutes(valStr1);
+        }
+        if (valStr2.length() > 0) {
+            day_mode_time = timeStrToMinutes(valStr2);
+        }
+
+        // Save the integer values to ESP32 Preferences (Flash)
+        preferences.begin("config", false);
+        preferences.putInt("time1", night_mode_time);
+        preferences.putInt("time2", day_mode_time);
+        preferences.end();
+
+        Serial.printf("Saved new times -> Night Start: %s (%d mins), Night End: %s (%d mins)\n", 
+                    minutesToTimeStr(night_mode_time).c_str(), night_mode_time,
+                    minutesToTimeStr(day_mode_time).c_str(), day_mode_time);
+    }
+
+    
     // Keep monitoring the physical button state
     btn_left.tick();
     btn_right.tick();
@@ -258,6 +397,7 @@ void loop() {
         head.setTarget(random(0, 180), random(0, 180));
     }
     if (currentState != lastState) {
+        #if DEBUG
         Serial.print("State changed to: ");
         switch (currentState) {
             case IDLE_MODE: Serial.println("IDLE_MODE"); break;
@@ -266,11 +406,12 @@ void loop() {
             case SET_HOURS: Serial.println("SET_HOURS"); break;
             case SET_MINUTES: Serial.println("SET_MINUTES"); break;
         }
+        #endif
         lastState = currentState;
     }
 
     // Run the display routines
-    if (millis() - lastFrameUpdate >= 10) { // only update every 10ms (100FPS)
+    if (millis() - lastFrameUpdate >= 30) { // only update every 10ms (100FPS)
         // if (millis() - lastInteractionTime > 30000 && currentState != NIGHT_MODE) { // 30 seconds of inactivity
         if (millis() - lastInteractionTime > 10000 && currentState != NIGHT_MODE && currentState != SET_HOURS && currentState != SET_MINUTES) { // 10 seconds of inactivity
             currentState = IDLE_MODE; // Return to idle mode
