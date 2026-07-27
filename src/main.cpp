@@ -11,7 +11,7 @@
 #include <FastLED.h>
 #include <Preferences.h>
 
-#define DEBUG true
+#define DEBUG false
 
 Preferences preferences;
 
@@ -66,17 +66,12 @@ int LEDcolor = 0;
 WiFiManager wm;
 int night_mode_time = 1200; // Default 20:00
 int day_mode_time = 480; // Default to 8:00
-bool shouldSaveConfig = false;
 bool portalClosed = false;
 unsigned long portalStartTime = 0;
 
 OtaManager ota;
 FaceHandler faceHandler;
 HeadController head;
-
-void saveConfigCallback() {
-  shouldSaveConfig = true;
-}
 
 String minutesToTimeStr(int totalMinutes) {
   int hours = totalMinutes / 60;
@@ -100,6 +95,36 @@ int timeStrToMinutes(String timeStr) {
   if (minutes > 59) minutes = 59;
   
   return (hours * 60) + minutes;
+}
+
+void saveConfigCallback() {
+    #if DEBUG
+    Serial.println("Parsing and saving new time configuration...");
+    #endif
+    
+    // Read the "HH:MM" strings submitted via the portal
+    String valStr1 = wm.getParameters()[0]->getValue();
+    String valStr2 = wm.getParameters()[1]->getValue();
+
+    // Convert strings to integer minutes with built-in validation checks
+    if (valStr1.length() > 0) {
+        night_mode_time = timeStrToMinutes(valStr1);
+    }
+    if (valStr2.length() > 0) {
+        day_mode_time = timeStrToMinutes(valStr2);
+    }
+
+    // Save the integer values to ESP32 Preferences (Flash)
+    preferences.begin("config", false);
+    preferences.putInt("time1", night_mode_time);
+    preferences.putInt("time2", day_mode_time);
+    preferences.end();
+
+    #if DEBUG
+    Serial.printf("Saved new times -> Night Start: %s (%d mins), Night End: %s (%d mins)\n", 
+                minutesToTimeStr(night_mode_time).c_str(), night_mode_time,
+                minutesToTimeStr(day_mode_time).c_str(), day_mode_time);
+    #endif
 }
 
 // ==========================================
@@ -199,7 +224,8 @@ void updateClock() {
     bool showColon = (now.second() % 2 == 0);
     display.showNumberDecEx(displayTime, showColon ? 0b01000000 : 0, true);
 
-    if (now.hour() >= 22 || now.hour() < 7) {
+    int now_minutes = now.hour()*60 + now.minute();
+    if (now_minutes >= night_mode_time || now_minutes < day_mode_time) {
         currentState = NIGHT_MODE;
     } else if (currentState == NIGHT_MODE) {
         currentState = IDLE_MODE;
@@ -281,21 +307,13 @@ void setup() {
     wm.addParameter(&night_mode_time_field);
     wm.addParameter(&day_mode_time_field);
 
-    if (wm.autoConnect("ClockBot", "ClockBot")) {
-        #if DEBUG
-        Serial.println("Connected to Wi-Fi successfully!");
-        #endif
-        delay(1000);
-        ota.begin();
-    } else {
-        #if DEBUG
-        Serial.println("Failed to connect to Wi-Fi. Starting Non-Blocking Config Portal...");
-        #endif
-        wm.startConfigPortal("ClockBot", "ClockBot");
-        portalClosed = false;
-        portalStartTime = millis();
-    }
-    
+    #if DEBUG
+    Serial.println("Starting Non-Blocking Config Portal...");
+    #endif
+    wm.startConfigPortal("ClockBot", "ClockBot");
+    portalClosed = false;
+    portalStartTime = millis();
+
     display.setBrightness(3);
 
     // FastLED.addLeds<WS2812, D9>(leds, NUM_LEDS);
@@ -345,42 +363,25 @@ void loop() {
             portalClosed = true;
             
             #if DEBUG
-            Serial.println("Portal closed. Continuing loop in offline state.");
+            Serial.println("Portal closed");
             #endif
+
+            if (wm.autoConnect("ClockBot", "ClockBot")) {
+                #if DEBUG
+                Serial.println("Connected to Wi-Fi successfully!");
+                #endif
+                delay(1000);
+                ota.begin();
+            } else {
+                #if DEBUG
+                Serial.println("Failed to connect to Wi-Fi, OTA impossible");
+                #endif
+            }
         } else {
             // Keep the portal responsive
             wm.process();
         }
     }
-   
-    if (shouldSaveConfig) {
-        #if DEBUG
-        Serial.println("Parsing and saving new time configuration...");
-        #endif
-        
-        // Read the "HH:MM" strings submitted via the portal
-        String valStr1 = wm.getParameters()[0]->getValue();
-        String valStr2 = wm.getParameters()[1]->getValue();
-
-        // Convert strings to integer minutes with built-in validation checks
-        if (valStr1.length() > 0) {
-            night_mode_time = timeStrToMinutes(valStr1);
-        }
-        if (valStr2.length() > 0) {
-            day_mode_time = timeStrToMinutes(valStr2);
-        }
-
-        // Save the integer values to ESP32 Preferences (Flash)
-        preferences.begin("config", false);
-        preferences.putInt("time1", night_mode_time);
-        preferences.putInt("time2", day_mode_time);
-        preferences.end();
-
-        Serial.printf("Saved new times -> Night Start: %s (%d mins), Night End: %s (%d mins)\n", 
-                    minutesToTimeStr(night_mode_time).c_str(), night_mode_time,
-                    minutesToTimeStr(day_mode_time).c_str(), day_mode_time);
-    }
-
     
     // Keep monitoring the physical button state
     btn_left.tick();
